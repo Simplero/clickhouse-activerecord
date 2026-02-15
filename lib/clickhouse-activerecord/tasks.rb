@@ -16,11 +16,9 @@ module ClickhouseActiverecord
       establish_master_connection
       connection.create_database @configuration.database
     rescue ActiveRecord::StatementInvalid => e
-      if e.cause.to_s.include?('already exists')
-        raise ActiveRecord::DatabaseAlreadyExists
-      else
-        raise
-      end
+      raise ActiveRecord::DatabaseAlreadyExists if e.cause.to_s.include?('already exists')
+
+      raise
     end
 
     def drop
@@ -39,13 +37,13 @@ module ClickhouseActiverecord
 
       # get all tables
       tables = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data'].flatten.map do |table|
-        next if %w[ar_internal_metadata].include?(table)
+        next if %w(ar_internal_metadata).include?(table)
 
         connection.show_create_table(table, single_line: false).gsub("#{@configuration.database}.", '')
       end.compact
 
       # sort view to last
-      tables.sort_by! {|table| table.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/) ? 1 : 0}
+      tables.sort_by! { |table| /^CREATE\s+(MATERIALIZED\s+)?VIEW/.match?(table) ? 1 : 0 }
 
       # get all functions
       functions = connection.execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' ORDER BY name")['data'].flatten
@@ -66,9 +64,9 @@ module ClickhouseActiverecord
       File.read(args.first).split(";\n\n").each do |sql|
         if sql.gsub(/[a-z]/i, '').blank?
           next
-        elsif sql =~ /^INSERT INTO/
+        elsif /^INSERT INTO/.match?(sql)
           connection.execute(sql, nil, format: nil)
-        elsif sql =~ /^CREATE .*?FUNCTION/
+        elsif /^CREATE .*?FUNCTION/.match?(sql)
           connection.execute(sql, nil, format: nil)
         else
           connection.execute(sql)
@@ -76,12 +74,17 @@ module ClickhouseActiverecord
       end
     end
 
+    # Rails 8.1 delegates this from DatabaseTasks#check_protected_environments! to each adapter.
+    # Clickhouse doesn't track migration environments, so this is a no-op.
+    def check_current_protected_environment!(*); end
+
     def migrate
       check_target_version
 
-      verbose = ENV["VERBOSE"] ? ENV["VERBOSE"] != "false" : true
-      scope = ENV["SCOPE"]
-      verbose_was, ActiveRecord::Migration.verbose = ActiveRecord::Migration.verbose, verbose
+      verbose = ENV['VERBOSE'] ? ENV['VERBOSE'] != 'false' : true
+      scope = ENV['SCOPE']
+      verbose_was = ActiveRecord::Migration.verbose
+      ActiveRecord::Migration.verbose = verbose
       connection.migration_context.migrate(target_version) do |migration|
         scope.blank? || scope == migration.scope
       end
@@ -97,13 +100,13 @@ module ClickhouseActiverecord
     end
 
     def check_target_version
-      if target_version && !(ActiveRecord::Migration::MigrationFilenameRegexp.match?(ENV["VERSION"]) || /\A\d+\z/.match?(ENV["VERSION"]))
+      if target_version && !(ActiveRecord::Migration::MigrationFilenameRegexp.match?(ENV['VERSION']) || /\A\d+\z/.match?(ENV['VERSION']))
         raise "Invalid format of target version: `VERSION=#{ENV['VERSION']}`"
       end
     end
 
     def target_version
-      ENV["VERSION"].to_i if ENV["VERSION"] && !ENV["VERSION"].empty?
+      ENV['VERSION'].to_i if ENV['VERSION'].present?
     end
   end
 end
